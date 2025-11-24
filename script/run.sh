@@ -5,41 +5,35 @@ DEPS_FILE="${1:-deps.pkg}"
 
 declare -A PACKAGE
 declare -A ALT_FLAGS
-declare -A ALTERNATIVE_MANAGER
+declare -A ALT_REQUIRED
 
 ALT_MANAGERS=("snap" "flatpak" "aur" "brew")
 
-is_alternative() {
-    local m="$1"
-    for alt in "${ALT_MANAGERS[@]}"; do
-        [[ "$m" == "$alt" ]] && return 0
-    done
-    return 1
-}
+log() { echo -e "👉 $*"; }
 
 detect_pkg_manager() {
     for pm in apt dnf pacman zypper apk; do
-        command -v $pm &>/dev/null && { echo "$pm"; return; }
+        command -v "$pm" &>/dev/null && { echo "$pm"; return; }
     done
     echo "unknown"
 }
 
 alt_manager_binary() {
     case "$1" in
-        snap) echo "snap" ;;
-        flatpak) echo "flatpak" ;;
-        aur) echo "yay" ;;
-        brew) echo "brew" ;;
+        snap) echo snap ;;
+        flatpak) echo flatpak ;;
+        aur) echo yay ;;
+        brew) echo brew ;;
     esac
 }
 
 install_alt_manager() {
-    local alt="$1"
-    local main_pm="$2"
+    local alt="$1" pm="$2"
 
+    log "Instalando gestor alternativo: $alt"
     case "$alt" in
         snap)
-            case "$main_pm" in
+            case "$pm" in
                 apt) sudo apt install -y snapd ;;
                 dnf) sudo dnf install -y snapd ;;
                 pacman) sudo pacman -Sy --noconfirm snapd ;;
@@ -48,7 +42,7 @@ install_alt_manager() {
             esac
             ;;
         flatpak)
-            case "$main_pm" in
+            case "$pm" in
                 apt) sudo apt install -y flatpak ;;
                 dnf) sudo dnf install -y flatpak ;;
                 pacman) sudo pacman -Sy --noconfirm flatpak ;;
@@ -57,15 +51,14 @@ install_alt_manager() {
             esac
             ;;
         aur)
-            case "$main_pm" in
+            case "$pm" in
                 pacman)
                     sudo pacman -Sy --noconfirm git base-devel
-                    tmpdir=$(mktemp -d)
-                    git clone https://aur.archlinux.org/yay.git "$tmpdir"
-                    (cd "$tmpdir" && makepkg -si --noconfirm)
+                    tmp=$(mktemp -d)
+                    git clone https://aur.archlinux.org/yay.git "$tmp"
+                    (cd "$tmp" && makepkg -si --noconfirm)
                     ;;
-                *)
-                    echo "AUR solo disponible en Arch"; exit 1 ;;
+                *) echo "AUR solo disponible en Arch"; exit 1 ;;
             esac
             ;;
         brew)
@@ -75,24 +68,33 @@ install_alt_manager() {
 }
 
 ensure_alt_manager_installed() {
-    local alt="$1"
-    local main_pm="$2"
+    local alt="$1" pm="$2"
     local bin
     bin="$(alt_manager_binary "$alt")"
-    command -v "$bin" &>/dev/null || install_alt_manager "$alt" "$main_pm"
+    command -v "$bin" &>/dev/null || install_alt_manager "$alt" "$pm"
 }
 
+###############################################
+# PARSER ARREGLADO — USA LOCAL IFS
+###############################################
 parse_line() {
     local line="$1"
+    [[ -z "$line" ]] && return
+
     local name="${line%%=*}"
     local rest="${line#*=}"
     name="$(echo "$name" | xargs)"
     rest="$(echo "$rest" | xargs)"
 
-    IFS=',' read -ra entries <<< "$rest"
+    local entries
+    local IFS=','
+    read -ra entries <<< "$rest"
+
     for entry in "${entries[@]}"; do
         entry="$(echo "$entry" | xargs)"
-        IFS=':' read -ra parts <<< "$entry"
+
+        local IFS=':'
+        read -ra parts <<< "$entry"
 
         local manager="${parts[0]}"
         local pkg="${parts[1]}"
@@ -100,38 +102,40 @@ parse_line() {
 
         PACKAGE["$name,$manager"]="$pkg"
         [[ -n "$flags" ]] && ALT_FLAGS["$name,$manager"]="$flags"
-        is_alternative "$manager" && ALTERNATIVE_MANAGER["$name"]=1
+
+        for alt in "${ALT_MANAGERS[@]}"; do
+            [[ "$manager" == "$alt" ]] && ALT_REQUIRED["$name"]=1
+        done
     done
 }
 
 parse_file() {
-    while IFS= read -r line; do
-        line="${line%%#*}"
-        [[ -z "$line" ]] && continue
+	# Leer el archivo línea por línea, manejando comentarios y líneas vacías
+    while IFS= read -r line || [[ -n "$line" ]]; do
+		line="$(echo "$line" | xargs)"
+		[[ -z "$line" || "${line:0:1}" == "#" ]] && continue
+		log "Leyendo línea: $line"
         parse_line "$line"
     done < "$DEPS_FILE"
 }
 
 install_native() {
-    local pm="$1"
-    local pkg="$2"
-
-    case "$pm" in
-        apt) sudo apt update -y && sudo apt install -y "$pkg" ;;
-        dnf) sudo dnf install -y "$pkg" ;;
-        pacman) sudo pacman -Sy --noconfirm "$pkg" ;;
-        zypper) sudo zypper install -y "$pkg" ;;
-        apk) sudo apk add "$pkg" ;;
+    case "$1" in
+        apt) sudo apt update -y && sudo apt install -y "$2" ;;
+        dnf) sudo dnf install -y "$2" ;;
+        pacman) sudo pacman -Sy --noconfirm "$2" ;;
+        zypper) sudo zypper install -y "$2" ;;
+        apk) sudo apk add "$2" ;;
     esac
 }
 
 install_alternative() {
-    local manager="$1"
-    local pkg="$2"
-    local main_pm="$3"
+    local name="$1" manager="$2" pkg="$3" pm="$4"
     local flags="${ALT_FLAGS[$name,$manager]}"
 
-    ensure_alt_manager_installed "$manager" "$main_pm"
+    ensure_alt_manager_installed "$manager" "$pm"
+
+    log "Instalando alternativo: $pkg ($manager) flags=[$flags]"
 
     case "$manager" in
         snap) sudo snap install "$pkg" ${flags:+$flags} ;;
@@ -142,41 +146,47 @@ install_alternative() {
 }
 
 install_package() {
-    local name="$1"
-    local main_pm="$2"
+    local name="$1" pm="$2"
 
-    if [[ -n "${ALTERNATIVE_MANAGER[$name]}" ]]; then
+    if [[ -n "${ALT_REQUIRED[$name]}" ]]; then
         for alt in "${ALT_MANAGERS[@]}"; do
             if [[ -n "${PACKAGE[$name,$alt]}" ]]; then
-                install_alternative "$alt" "${PACKAGE[$name,$alt]}" "$main_pm"
+                install_alternative "$name" "$alt" "${PACKAGE[$name,$alt]}" "$pm"
                 return
             fi
         done
     fi
 
-    if [[ -n "${PACKAGE[$name,$main_pm]}" ]]; then
-        install_native "$main_pm" "${PACKAGE[$name,$main_pm]}"
+    if [[ -n "${PACKAGE[$name,$pm]}" ]]; then
+        install_native "$pm" "${PACKAGE[$name,$pm]}"
         return
     fi
 
     if [[ -n "${PACKAGE[$name,native]}" ]]; then
-        install_native "$main_pm" "${PACKAGE[$name,native]}"
+        install_native "$pm" "${PACKAGE[$name,native]}"
         return
     fi
-
-    echo "No se puede instalar $name"
 }
 
-MAIN_PM=$(detect_pkg_manager)
+###############################################
+# EJECUCIÓN
+###############################################
+PM=$(detect_pkg_manager)
+log "Gestor nativo detectado: $PM"
+
 parse_file
 
-declare -A NAMES
+declare -A ALL_NAMES
 for key in "${!PACKAGE[@]}"; do
-    IFS=',' read -r name manager <<< "$key"
-    NAMES["$name"]=1
+    IFS=',' read -r name _ <<< "$key"
+    ALL_NAMES["$name"]=1
 done
 
-for name in "${!NAMES[@]}"; do
-    install_package "$name" "$MAIN_PM"
+for name in "${!ALL_NAMES[@]}"; do
+    echo ""
+    log "▶ Instalando $name"
+    install_package "$name" "$PM"
 done
 
+echo ""
+log "✔ Finalizado"
