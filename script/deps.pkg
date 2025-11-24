@@ -1,0 +1,8 @@
+git = native:git
+zsh = native:zsh
+curl = native:curl
+wget = native:wget
+neovim = snap:nvim:--classic
+vscode = snap:code:--classic
+
+
