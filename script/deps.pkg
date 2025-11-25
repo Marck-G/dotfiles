@@ -3,6 +3,5 @@ zsh = native:zsh
 curl = native:curl
 wget = native:wget
 neovim = snap:nvim:--classic
-vscode = snap:code:--classic
+# vscode = snap:code:--classic
 stow = native:stow
-

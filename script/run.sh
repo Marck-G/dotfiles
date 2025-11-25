@@ -1,192 +1,229 @@
-#!/usr/bin/env bash
-set -e
+#!/usr/bin/env python3
 
-DEPS_FILE="${1:-deps.pkg}"
+import re
+import json
+import subprocess
+import time
+import sys
+import threading
+import shutil
 
-declare -A PACKAGE
-declare -A ALT_FLAGS
-declare -A ALT_REQUIRED
+# This file is allocated relative to this script so we need to get the current file's path
+DEPS_FILE = __file__.replace('run.sh', 'deps.pkg')
+dependencies = {}
 
-ALT_MANAGERS=("snap" "flatpak" "aur" "brew")
+# Line pattern
+line_pattern = re.compile(r"^\s*(?![#])(?P<key>[\w-]+)\s*=\s*(?P<raw_value>.+)$", re.MULTILINE)
 
-log() { echo -e "👉 $*"; }
+# Value pattern
+item_pattern = re.compile(r"\s*(?P<manager>[^:,]+):(?P<package>[^:,]+)(?::(?P<flags>[^,]+))?")
 
-detect_pkg_manager() {
-    for pm in apt dnf pacman zypper apk; do
-        command -v "$pm" &>/dev/null && { echo "$pm"; return; }
-    done
-    echo "unknown"
+# Alternative manager names with the package name
+alt_managers = {
+	'snap': 'snapd',
+	'flatpak': 'flatpak',
 }
 
-alt_manager_binary() {
-    case "$1" in
-        snap) echo snap ;;
-        flatpak) echo flatpak ;;
-        aur) echo yay ;;
-        brew) echo brew ;;
-    esac
+PACKAGE_MANAGERS = [
+    ("apt", ["apt-get", "apt"]),
+    ("dnf", ["dnf"]),
+    ("yum", ["yum"]),
+    ("pacman", ["pacman"]),
+    ("zypper", ["zypper"]),
+    ("apk", ["apk"]),
+]
+
+INSTALL_COMMANDS = {
+    "apt": {
+        "snapd": ["sudo", "apt-get", "install", "-y", "snapd"],
+        "flatpak": ["sudo", "apt-get", "install", "-y", "flatpak"],
+    },
+    "dnf": {
+        "snapd": ["sudo", "dnf", "install", "-y", "snapd"],
+        "flatpak": ["sudo", "dnf", "install", "-y", "flatpak"],
+    },
+    "yum": {
+        "snapd": ["sudo", "yum", "install", "-y", "snapd"],
+        "flatpak": ["sudo", "yum", "install", "-y", "flatpak"],
+    },
+    "pacman": {
+        "snapd": ["sudo", "pacman", "-S", "--noconfirm", "snapd"],
+        "flatpak": ["sudo", "pacman", "-S", "--noconfirm", "flatpak"],
+    },
+    "zypper": {
+        "snapd": ["sudo", "zypper", "install", "-y", "snapd"],
+        "flatpak": ["sudo", "zypper", "install", "-y", "flatpak"],
+    },
+    "apk": {
+        "snapd": ["sudo", "apk", "add", "snapd"],
+        "flatpak": ["sudo", "apk", "add", "flatpak"],
+    }
 }
 
-install_alt_manager() {
-    local alt="$1" pm="$2"
+def has_snap():
+    return shutil.which("snap") is not None
 
-    log "Instalando gestor alternativo: $alt"
-    case "$alt" in
-        snap)
-            case "$pm" in
-                apt) sudo apt install -y snapd ;;
-                dnf) sudo dnf install -y snapd ;;
-                pacman) sudo pacman -Sy --noconfirm snapd ;;
-                zypper) sudo zypper install -y snapd ;;
-                apk) sudo apk add snapd ;;
-            esac
-            ;;
-        flatpak)
-            case "$pm" in
-                apt) sudo apt install -y flatpak ;;
-                dnf) sudo dnf install -y flatpak ;;
-                pacman) sudo pacman -Sy --noconfirm flatpak ;;
-                zypper) sudo zypper install -y flatpak ;;
-                apk) sudo apk add flatpak ;;
-            esac
-            ;;
-        aur)
-            case "$pm" in
-                pacman)
-                    sudo pacman -Sy --noconfirm git base-devel
-                    tmp=$(mktemp -d)
-                    git clone https://aur.archlinux.org/yay.git "$tmp"
-                    (cd "$tmp" && makepkg -si --noconfirm)
-                    ;;
-                *) echo "AUR solo disponible en Arch"; exit 1 ;;
-            esac
-            ;;
-        brew)
-            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-            ;;
-    esac
-}
+def has_flatpak():
+    return shutil.which("flatpak") is not None
 
-ensure_alt_manager_installed() {
-    local alt="$1" pm="$2"
-    local bin
-    bin="$(alt_manager_binary "$alt")"
-    command -v "$bin" &>/dev/null || install_alt_manager "$alt" "$pm"
-}
+def log(msg: str, emoji: str = "📦"):
+    """
+    Imprime un mensaje con un emoji al inicio de cada línea.
+    """
+    # Asegura que si el mensaje tiene varias líneas, todas lleven emoji
+    for line in msg.splitlines():
+        print(f" {emoji} {line}")
 
-###############################################
-# PARSER ARREGLADO — USA LOCAL IFS
-###############################################
-parse_line() {
-    local line="$1"
-    [[ -z "$line" ]] && return
 
-    local name="${line%%=*}"
-    local rest="${line#*=}"
-    name="$(echo "$name" | xargs)"
-    rest="$(echo "$rest" | xargs)"
+def detect_package_manager():
+    for name, executables in PACKAGE_MANAGERS:
+        for exe in executables:
+            if shutil.which(exe):
+                return name
+    return None
 
-    local entries
-    local IFS=','
-    read -ra entries <<< "$rest"
+CURRENT_MANAGER = detect_package_manager()
+log (f"Gestor de paquetes detectado: {CURRENT_MANAGER}", "🔍")
+def install_package(pkg):
+    pm = detect_package_manager()
+    cmd = []
+    if pm == "apt":
+        cmd = ["sudo", "apt-get", "install", "-y", pkg]
+    elif pm == "dnf":
+        cmd = ["sudo", "dnf", "install", "-y", pkg]
+    elif pm == "yum":
+        cmd = ["sudo", "yum", "install", "-y", pkg]
+    elif pm == "pacman":
+        cmd = ["sudo", "pacman", "-S", "--noconfirm", pkg]
+    elif pm == "zypper":
+        cmd = ["sudo", "zypper", "install", "-y", pkg]
+    elif pm == "apk":
+        cmd = ["sudo", "apk", "add", pkg]
+    else:
+        raise RuntimeError("No se encontró un gestor de paquetes compatible.")
+    log(f"Instalando paquete '{pkg}' usando {pm}…", "📦")
+    subprocess.run(cmd, check=True)
 
-    for entry in "${entries[@]}"; do
-        entry="$(echo "$entry" | xargs)"
+def ensure_manager_installed(manager_name):
+    """
+    manager_name = 'snapd' o 'flatpak'
+    """
+    system_pm = detect_system_package_manager()
+    if not system_pm:
+        raise RuntimeError("No se pudo detectar el gestor base del sistema.")
 
-        local IFS=':'
-        read -ra parts <<< "$entry"
+    cmd = INSTALL_COMMANDS.get(system_pm, {}).get(manager_name)
+    if not cmd:
+        raise RuntimeError(f"No sabemos cómo instalar {manager_name} en {system_pm}")
 
-        local manager="${parts[0]}"
-        local pkg="${parts[1]}"
-        local flags="${parts[2]:-}"
+    print(f"🛠️ Instalando {manager_name} usando {system_pm}…")
+    subprocess.run(cmd, check=True)
 
-        PACKAGE["$name,$manager"]="$pkg"
-        [[ -n "$flags" ]] && ALT_FLAGS["$name,$manager"]="$flags"
+def install_snap_package(pkg, flags=""):
+    if not has_snap():
+        ensure_manager_installed("snapd")
 
-        for alt in "${ALT_MANAGERS[@]}"; do
-            [[ "$manager" == "$alt" ]] && ALT_REQUIRED["$name"]=1
-        done
-    done
-}
+    cmd = ["sudo", "snap", "install", pkg, flags]
+    print(f"📦 Instalando paquete snap: {pkg}")
+    subprocess.run(cmd, check=True)
 
-parse_file() {
-	# Leer el archivo línea por línea, manejando comentarios y líneas vacías
-    while IFS= read -r line || [[ -n "$line" ]]; do
-		line="$(echo "$line" | xargs)"
-		[[ -z "$line" || "${line:0:1}" == "#" ]] && continue
-		log "Leyendo línea: $line"
-        parse_line "$line"
-    done < "$DEPS_FILE"
-}
 
-install_native() {
-    case "$1" in
-        apt) sudo apt update -y && sudo apt install -y "$2" ;;
-        dnf) sudo dnf install -y "$2" ;;
-        pacman) sudo pacman -Sy --noconfirm "$2" ;;
-        zypper) sudo zypper install -y "$2" ;;
-        apk) sudo apk add "$2" ;;
-    esac
-}
+def install_flatpak_package(pkg, flags=""):
+    if not has_flatpak():
+        ensure_manager_installed("flatpak")
 
-install_alternative() {
-    local name="$1" manager="$2" pkg="$3" pm="$4"
-    local flags="${ALT_FLAGS[$name,$manager]}"
+    cmd = ["flatpak", "install", "-y", pkg, flags]
+    print(f"📦 Instalando paquete flatpak: {pkg}")
+    subprocess.run(cmd, check=True)
 
-    ensure_alt_manager_installed "$manager" "$pm"
+def run_with_spinner(cmd, emoji="⏳"):
+    spinner_chars = ["|", "/", "-", "\\"]
+    start = time.time()
+    spinner_running = True
 
-    log "Instalando alternativo: $pkg ($manager) flags=[$flags]"
+    # Función del spinner corriendo en segundo plano
+    def spinner():
+        i = 0
+        while spinner_running:
+            elapsed = int(time.time() - start)
+            sys.stdout.write(f"\r{emoji} {spinner_chars[i % 4]}  Ejecutando... {elapsed}s")
+            sys.stdout.flush()
+            i += 1
+            time.sleep(0.1)
 
-    case "$manager" in
-        snap) sudo snap install "$pkg" ${flags:+$flags} ;;
-        flatpak) flatpak install -y ${flags:+$flags} "$pkg" ;;
-        aur) yay -S --noconfirm ${flags:+$flags} "$pkg" ;;
-        brew) brew install ${flags:+$flags} "$pkg" ;;
-    esac
-}
+    # Lanzamos spinner en thread
+    spinner_thread = threading.Thread(target=spinner)
+    spinner_thread.start()
 
-install_package() {
-    local name="$1" pm="$2"
+    # Lanzamos el proceso
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True
+    )
 
-    if [[ -n "${ALT_REQUIRED[$name]}" ]]; then
-        for alt in "${ALT_MANAGERS[@]}"; do
-            if [[ -n "${PACKAGE[$name,$alt]}" ]]; then
-                install_alternative "$name" "$alt" "${PACKAGE[$name,$alt]}" "$pm"
-                return
-            fi
-        done
-    fi
+    # Leemos salida en tiempo real
+    for line in process.stdout:
+        # Aquí puedes usar tu log con emojis:
+        log(f"\n {line.strip()}", "📄")
 
-    if [[ -n "${PACKAGE[$name,$pm]}" ]]; then
-        install_native "$pm" "${PACKAGE[$name,$pm]}"
-        return
-    fi
+    # Esperamos a que acabe
+    process.wait()
 
-    if [[ -n "${PACKAGE[$name,native]}" ]]; then
-        install_native "$pm" "${PACKAGE[$name,native]}"
-        return
-    fi
-}
+    # Terminamos spinner
+    spinner_running = False
+    spinner_thread.join()
 
-###############################################
-# EJECUCIÓN
-###############################################
-PM=$(detect_pkg_manager)
-log "Gestor nativo detectado: $PM"
+    # Línea final para limpiar spinner
+    elapsed = int(time.time() - start)
+    log(f"\r Completado en {elapsed}s         ", "✅")
 
-parse_file
+    return process.returncode
 
-declare -A ALL_NAMES
-for key in "${!PACKAGE[@]}"; do
-    IFS=',' read -r name _ <<< "$key"
-    ALL_NAMES["$name"]=1
-done
+with open(DEPS_FILE, 'r') as f:
+	file_content = f.read()
+	for match in line_pattern.finditer(file_content):
+		key = match.group('key')
+		items = {}
+		raw_value = match.group('raw_value')
+		for item_match in item_pattern.finditer(raw_value):
+			manager = item_match.group('manager')
+			package = item_match.group('package')
+			flags = item_match.group('flags')
+			items[manager] = {
+				'package': package,
+			}
+			if flags:
+				items[manager]['flags'] = flags
+		log(f"Dependency '{key}':")
+		dependencies[key] = items
 
-for name in "${!ALL_NAMES[@]}"; do
-    echo ""
-    log "▶ Instalando $name"
-    install_package "$name" "$PM"
-done
 
-echo ""
-log "✔ Finalizado"
+
+for pkg, managers in dependencies.items():
+	log(f"Procesando dependencia '{pkg}'…", "🔄")
+	log(f"Opciones de gestores: {json.dumps(managers)}", "ℹ️")
+	if CURRENT_MANAGER in managers:
+		pkg_info = managers[CURRENT_MANAGER]
+		package_name = pkg_info['package']
+		flags = pkg_info.get('flags', '')
+
+		log(f"Instalando '{pkg}' usando {CURRENT_MANAGER}…", "🚀")
+
+		try:
+			log(f"'{package_name}' instalado correctamente.", "✅")
+			install_package(package_name)
+		except Exception as e:
+			log(f"Error al instalar '{pkg}': {e}", "❌")
+	elif 'snap' in managers:
+		package_name = managers['snap']['package']
+		install_snap_package(package_name, flags)
+	elif 'flatpak' in managers:
+		package_name = managers['flatpak']['package']
+		install_flatpak_package(package_name, flags)
+	elif 'native' in managers:
+		package_name = managers['native']['package']
+		install_package(package_name)
+	else:
+		log(f"No hay información de instalación para '{pkg}' con el gestor '{CURRENT_MANAGER}'.", "⚠️")
