@@ -10,3 +10,6 @@ require("core.autocmds")
 
 -- Bootstrap lazy.nvim (auto-installs on first run)
 require("core.lazy")
+
+-- System dependency check (shows warnings for missing tools)
+require("core.syscheck").setup()

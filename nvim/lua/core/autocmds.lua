@@ -9,7 +9,7 @@ local autocmd = vim.api.nvim_create_autocmd
 augroup("YankHighlight", { clear = true })
 autocmd("TextYankPost", {
   group    = "YankHighlight",
-  callback = function() vim.highlight.on_yank({ higroup = "Visual", timeout = 200 }) end,
+  callback = function() vim.hl.on_yank({ higroup = "Visual", timeout = 200 }) end,
 })
 
 -- ── Remove trailing whitespace on save ────────────────────

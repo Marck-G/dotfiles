@@ -57,6 +57,13 @@ require("lazy").setup(specs, {
     enabled = true,    -- auto-reload config when changed
     notify  = false,
   },
+  -- ── Disable rocks entirely ────────────────────────────
+  -- Prevents lazy-rocks/ from being created and polluting
+  -- package.path with paths that shadow installed plugins.
+  rocks = {
+    enabled   = false,
+    hererocks = false,
+  },
 
   performance = {
     rtp = {

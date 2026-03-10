@@ -53,6 +53,87 @@ opt.timeoutlen     = 300            -- faster which-key popup
 opt.redrawtime     = 1500
 opt.lazyredraw     = false          -- must be false for noice.nvim
 
+
+-- ── Clipboard ─────────────────────────────────────────────
+-- Detect the best available clipboard provider and configure accordingly.
+-- Priority: tmux → wayland (wl-copy) → X11 (xclip/xsel) → macOS (pbcopy) → WSL
+local function setup_clipboard()
+  -- tmux: works inside any terminal multiplexer session
+  if vim.env.TMUX ~= nil then
+    vim.g.clipboard = {
+      name = "tmux",
+      copy  = { ["+"] = { "tmux", "load-buffer", "-" },
+                ["*"] = { "tmux", "load-buffer", "-" } },
+      paste = { ["+"] = { "tmux", "save-buffer", "-" },
+                ["*"] = { "tmux", "save-buffer", "-" } },
+      cache_enabled = 0,
+    }
+    return
+  end
+
+  -- Wayland
+  if vim.env.WAYLAND_DISPLAY ~= nil then
+    if vim.fn.executable("wl-copy") == 1 then
+      vim.g.clipboard = {
+        name  = "wl-clipboard",
+        copy  = { ["+"] = { "wl-copy" },          ["*"] = { "wl-copy", "--primary" } },
+        paste = { ["+"] = { "wl-paste", "--no-newline" },
+                  ["*"] = { "wl-paste", "--no-newline", "--primary" } },
+        cache_enabled = 0,
+      }
+      return
+    end
+  end
+
+  -- X11 — prefer xclip, fall back to xsel
+  if vim.env.DISPLAY ~= nil then
+    if vim.fn.executable("xclip") == 1 then
+      vim.g.clipboard = {
+        name  = "xclip",
+        copy  = { ["+"] = { "xclip", "-selection", "clipboard" },
+                  ["*"] = { "xclip", "-selection", "primary"   } },
+        paste = { ["+"] = { "xclip", "-selection", "clipboard", "-o" },
+                  ["*"] = { "xclip", "-selection", "primary",   "-o" } },
+        cache_enabled = 0,
+      }
+      return
+    end
+    if vim.fn.executable("xsel") == 1 then
+      vim.g.clipboard = {
+        name  = "xsel",
+        copy  = { ["+"] = { "xsel", "--clipboard", "--input" },
+                  ["*"] = { "xsel", "--primary",   "--input" } },
+        paste = { ["+"] = { "xsel", "--clipboard", "--output" },
+                  ["*"] = { "xsel", "--primary",   "--output" } },
+        cache_enabled = 0,
+      }
+      return
+    end
+  end
+
+  -- macOS
+  if vim.fn.has("mac") == 1 then
+    -- pbcopy/pbpaste are always available on macOS, nothing to do —
+    -- Neovim detects them automatically via unnamedplus.
+    return
+  end
+
+  -- WSL (Windows Subsystem for Linux)
+  if vim.fn.has("wsl") == 1 then
+    vim.g.clipboard = {
+      name  = "win32yank-wsl",
+      copy  = { ["+"] = { "win32yank.exe", "-i", "--crlf" },
+                ["*"] = { "win32yank.exe", "-i", "--crlf" } },
+      paste = { ["+"] = { "win32yank.exe", "-o", "--lf"   },
+                ["*"] = { "win32yank.exe", "-o", "--lf"   } },
+      cache_enabled = 0,
+    }
+    return
+  end
+end
+
+setup_clipboard()
+
 -- ── Clipboard ─────────────────────────────────────────────
 opt.clipboard      = "unnamedplus"  -- sync with system clipboard
 
